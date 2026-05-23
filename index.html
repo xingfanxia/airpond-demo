@@ -356,7 +356,7 @@ function uploadCustomMedia(source){
 
 // ===== Camera =====
 const video=document.createElement('video');
-video.setAttribute('playsinline','');video.muted=true;
+video.setAttribute('playsinline','');video.setAttribute('autoplay','');video.muted=true;
 async function startCamera(facing){
   if(video.srcObject)video.srcObject.getTracks().forEach(t=>t.stop());
   const stream=await navigator.mediaDevices.getUserMedia({
