@@ -39,6 +39,7 @@ canvas{display:block;width:100%;height:100%}
   <button id="btn-reveal">Reveal</button>
   <button id="btn-liquid" class="active">Liquid</button>
   <button id="btn-crystal">Crystal</button>
+  <button id="btn-star">Star</button>
 </div>
 <input type="file" id="media-input" accept="image/*,video/*" style="display:none">
 
@@ -578,6 +579,89 @@ function renderTearMode(){
   gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
 }
 
+// --- Starlight mode ---
+const starVS=`attribute vec4 a_data;varying float v_alpha;
+void main(){gl_Position=vec4(a_data.xy*2.0-1.0,0.0,1.0);gl_PointSize=a_data.z;v_alpha=a_data.w;}`;
+const starFS=`precision highp float;varying float v_alpha;
+void main(){float d=length(gl_PointCoord-0.5)*2.0;
+float glow=exp(-d*d*3.0)*v_alpha;
+float core=smoothstep(0.5,0.0,d)*v_alpha*0.6;
+vec3 warm=mix(vec3(1.0,0.92,0.8),vec3(0.85,0.9,1.0),gl_PointCoord.y);
+gl_FragColor=vec4(warm*(glow+core),glow+core);}`;
+const camPassVS=`attribute vec2 a_pos;varying vec2 v_uv;
+void main(){v_uv=a_pos*0.5+0.5;gl_Position=vec4(a_pos,0.0,1.0);}`;
+const camPassFS=`precision highp float;uniform sampler2D u_camera;uniform float u_mirror;uniform float u_dim;varying vec2 v_uv;
+void main(){vec2 uv=vec2(mix(v_uv.x,1.0-v_uv.x,u_mirror),v_uv.y);
+vec3 c=texture2D(u_camera,uv).rgb*u_dim;gl_FragColor=vec4(c,1.0);}`;
+
+const starProg=createProgram(starVS,starFS);
+const camPassProg=createProgram(camPassVS,camPassFS);
+const starBuf=gl.createBuffer();
+const MAX_P=600;
+const pts=[];
+const starData=new Float32Array(MAX_P*4);
+
+function spawnParticles(sx,sy,count){
+  for(let i=0;i<count;i++){
+    const angle=Math.random()*Math.PI*2;
+    const speed=0.002+Math.random()*0.008;
+    pts.push({x:sx+(Math.random()-0.5)*0.03,y:sy+(Math.random()-0.5)*0.03,
+      vx:Math.cos(angle)*speed,vy:Math.sin(angle)*speed-0.003,
+      life:1,decay:0.3+Math.random()*0.7,sz:3+Math.random()*6,br:0.4+Math.random()*0.6});
+  }
+  while(pts.length>MAX_P)pts.shift();
+}
+
+function renderStarMode(){
+  // Get input position
+  let sx=-1,sy=-1,active=false;
+  if(fingers[2]>0.5){
+    let cx=0,cy=0,cnt=0;
+    for(let i=0;i<10;i++){if(fingers[i*3+2]>0.5){cx+=fingers[i*3];cy+=fingers[i*3+1];cnt++;}}
+    if(cnt>0){sx=cx/cnt;sy=cy/cnt;active=true;}
+  }
+  if(touchActive){sx=touchX;sy=touchY;active=true;}
+
+  if(active)spawnParticles(sx,1-sy,3+Math.floor(Math.random()*3));
+
+  // Update particles
+  for(let i=pts.length-1;i>=0;i--){
+    const p=pts[i];p.x+=p.vx;p.y+=p.vy;p.vy-=0.00008;p.life-=0.016/p.decay;
+    if(p.life<=0)pts.splice(i,1);
+  }
+
+  // Draw camera with slight dim
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,W,H);
+  gl.useProgram(camPassProg);gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf);
+  const cl=gl.getAttribLocation(camPassProg,'a_pos');
+  gl.enableVertexAttribArray(cl);gl.vertexAttribPointer(cl,2,gl.FLOAT,false,0,0);
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,camTex);
+  gl.uniform1i(gl.getUniformLocation(camPassProg,'u_camera'),0);
+  gl.uniform1f(gl.getUniformLocation(camPassProg,'u_mirror'),facingMode==='user'?1:0);
+  gl.uniform1f(gl.getUniformLocation(camPassProg,'u_dim'),0.7);
+  gl.disable(gl.BLEND);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  if(pts.length===0)return;
+
+  // Upload particle data
+  let n=0;
+  for(const p of pts){
+    const alpha=p.life*p.br;
+    starData[n++]=p.x;starData[n++]=p.y;starData[n++]=p.sz*(0.5+p.life*0.5);starData[n++]=alpha;
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER,starBuf);
+  gl.bufferData(gl.ARRAY_BUFFER,starData.subarray(0,n),gl.DYNAMIC_DRAW);
+
+  // Draw particles
+  gl.useProgram(starProg);
+  const dl=gl.getAttribLocation(starProg,'a_data');
+  gl.enableVertexAttribArray(dl);gl.vertexAttribPointer(dl,4,gl.FLOAT,false,0,0);
+  gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);
+  gl.drawArrays(gl.POINTS,0,pts.length);
+  gl.disable(gl.BLEND);
+}
+
 // --- Render loop ---
 let time = 0;
 function render(){
@@ -594,6 +678,7 @@ function render(){
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
 
   if(currentMode === 'reveal'){ renderTearMode(); return; }
+  if(currentMode === 'star'){ renderStarMode(); return; }
 
   // --- Physics simulation pass (3 iterations) ---
   gl.useProgram(simProg);
@@ -680,6 +765,11 @@ document.getElementById('btn-liquid').onclick = ()=>{
 document.getElementById('btn-crystal').onclick = ()=>{
   currentMode='ripple';mode=1.0;clearBtnActive();
   document.getElementById('btn-crystal').classList.add('active');
+};
+document.getElementById('btn-star').onclick = ()=>{
+  currentMode='star';clearBtnActive();
+  document.getElementById('btn-star').classList.add('active');
+  pts.length=0;
 };
 document.getElementById('flip-btn').onclick = async ()=>{
   facingMode = facingMode === 'user' ? 'environment' : 'user';
