@@ -3,17 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>Airpond - Interactive Water Effect</title>
+<title>AirReveal</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%;height:100%;overflow:hidden;background:#000;touch-action:none}
 canvas{display:block;width:100%;height:100%}
-#ui{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);display:flex;gap:12px;z-index:10}
-#ui button{padding:8px 20px;border:none;border-radius:20px;font-size:14px;cursor:pointer;
-  background:rgba(255,255,255,0.15);color:#fff;backdrop-filter:blur(8px);
-  -webkit-backdrop-filter:blur(8px);transition:background .2s}
-#ui button.active{background:rgba(100,180,255,0.4)}
-#ui button:active{background:rgba(100,180,255,0.6)}
 #loading{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
   background:#000;color:#fff;font-family:system-ui;z-index:100;transition:opacity .5s}
 #loading.hide{opacity:0;pointer-events:none}
@@ -21,547 +15,571 @@ canvas{display:block;width:100%;height:100%}
 .spinner{width:40px;height:40px;border:3px solid rgba(255,255,255,.2);
   border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-#flip-btn{position:fixed;top:20px;right:20px;z-index:10;width:40px;height:40px;
-  border:none;border-radius:50%;background:rgba(255,255,255,0.15);
-  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);cursor:pointer;
-  display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff}
+.cb{position:fixed;z-index:10;width:42px;height:42px;border:none;border-radius:50%;
+  background:rgba(255,255,255,0.15);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:17px;color:#fff;
+  transition:background .2s,transform .15s}
+.cb:active{background:rgba(255,255,255,0.3);transform:scale(0.92)}
+#flip-btn{top:20px;right:20px}
+#upload-btn{top:70px;right:20px}
+#mode-bar{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:10}
+#mode-bar button{padding:7px 18px;border:1.5px solid rgba(255,255,255,0.25);border-radius:20px;
+  font-size:13px;cursor:pointer;background:transparent;color:rgba(255,255,255,0.6);
+  font-family:system-ui;transition:all .2s}
+#mode-bar button.active{background:rgba(255,255,255,0.18);color:#fff;border-color:rgba(255,255,255,0.5)}
+#hint{position:fixed;bottom:72px;left:50%;transform:translateX(-50%);
+  font-family:system-ui;font-size:12px;color:rgba(255,255,255,0.4);
+  pointer-events:none;transition:opacity 1s;white-space:nowrap}
 </style>
 </head>
 <body>
 <div id="loading"><div class="spinner"></div><p>Loading camera &amp; hand tracking...</p></div>
 <canvas id="c"></canvas>
-<button id="flip-btn" title="Flip Camera">&#x1F504;</button>
-<div id="ui">
-  <button id="btn-liquid" class="active">Liquid</button>
-  <button id="btn-crystal">Crystal</button>
+<button class="cb" id="flip-btn" title="Flip Camera">&#x1F504;</button>
+<button class="cb" id="upload-btn" title="Upload Media">&#x1F30A;</button>
+<input type="file" id="media-input" accept="image/*,video/*" style="display:none">
+<div id="mode-bar">
+  <button id="m-reveal" class="active">Reveal</button>
+  <button id="m-ripple">Ripple</button>
 </div>
+<div id="hint">Raise your hand to reveal ✨</div>
 
 <script type="module">
+// ===== GL Setup =====
 const canvas = document.getElementById('c');
-const gl = canvas.getContext('webgl', {alpha:false, antialias:false, preserveDrawingBuffer:false});
+const gl = canvas.getContext('webgl',{alpha:false,antialias:false,preserveDrawingBuffer:false});
 if(!gl){alert('WebGL not supported');throw new Error('no webgl')}
-
-const extFloat = gl.getExtension('OES_texture_float');
-const extHalf = gl.getExtension('OES_texture_half_float');
-const extLinF = gl.getExtension('OES_texture_float_linear');
-const extLinH = gl.getExtension('OES_texture_half_float_linear');
+gl.getExtension('OES_texture_float');
+gl.getExtension('OES_texture_half_float');
+gl.getExtension('OES_texture_float_linear');
+gl.getExtension('OES_texture_half_float_linear');
+const texType = gl.getExtension('OES_texture_float') ? gl.FLOAT :
+  (gl.getExtension('OES_texture_half_float') ? gl.getExtension('OES_texture_half_float').HALF_FLOAT_OES : gl.UNSIGNED_BYTE);
 
 let W, H, simW, simH;
-let mode = 0.0; // 0=liquid, 1=crystal
+let currentMode = 'reveal'; // 'reveal' or 'ripple'
 let facingMode = 'user';
 let videoReady = false;
 let handsReady = false;
+let time = 0;
 
-const fingers = new Float32Array(30); // 10 fingers * (x,y,active)
-const prevFingers = new Float32Array(30);
-
-// --- Video setup ---
-const video = document.createElement('video');
-video.setAttribute('playsinline','');
-video.setAttribute('autoplay','');
-video.muted = true;
-
-async function startCamera(facing){
-  if(video.srcObject) video.srcObject.getTracks().forEach(t=>t.stop());
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video:{facingMode:facing, width:{ideal:1280}, height:{ideal:720}},
-    audio:false
-  });
-  video.srcObject = stream;
-  await video.play();
-  videoReady = true;
-}
-
-// --- Shader compilation ---
-function compileShader(src, type){
-  const s = gl.createShader(type);
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
-    console.error(gl.getShaderInfoLog(s));
-    console.error(src);
-  }
-  return s;
-}
-function createProgram(vs, fs){
-  const p = gl.createProgram();
-  gl.attachShader(p, compileShader(vs, gl.VERTEX_SHADER));
-  gl.attachShader(p, compileShader(fs, gl.FRAGMENT_SHADER));
-  gl.linkProgram(p);
-  if(!gl.getShaderParameter) return p;
-  return p;
-}
-
-const quadVS = `
-attribute vec2 a_pos;
-varying vec2 v_uv;
-void main(){
-  v_uv = a_pos * 0.5 + 0.5;
-  gl_Position = vec4(a_pos, 0.0, 1.0);
-}`;
-
-// --- Physics simulation shader ---
-const simFS = `
-precision highp float;
-uniform sampler2D u_prev;
-uniform sampler2D u_curr;
-uniform vec2 u_texel;
-uniform float u_damping;
-uniform vec3 u_fingers[10];
-uniform vec3 u_prevFingers[10];
-uniform float u_radius;
-uniform float u_time;
-varying vec2 v_uv;
-
-float capsuleSDF(vec2 p, vec2 a, vec2 b){
-  vec2 pa = p - a, ba = b - a;
-  float h = clamp(dot(pa,ba)/dot(ba,ba), 0.0, 1.0);
-  return length(pa - ba*h);
-}
-
-void main(){
-  float prev = texture2D(u_prev, v_uv).r;
-  float curr = texture2D(u_curr, v_uv).r;
-
-  // 9-tap isotropic stencil
-  float avg = 0.0;
-  avg += texture2D(u_curr, v_uv + vec2(-u_texel.x, 0.0)).r * 0.2;
-  avg += texture2D(u_curr, v_uv + vec2( u_texel.x, 0.0)).r * 0.2;
-  avg += texture2D(u_curr, v_uv + vec2(0.0, -u_texel.y)).r * 0.2;
-  avg += texture2D(u_curr, v_uv + vec2(0.0,  u_texel.y)).r * 0.2;
-  avg += texture2D(u_curr, v_uv + vec2(-u_texel.x, -u_texel.y)).r * 0.05;
-  avg += texture2D(u_curr, v_uv + vec2( u_texel.x, -u_texel.y)).r * 0.05;
-  avg += texture2D(u_curr, v_uv + vec2(-u_texel.x,  u_texel.y)).r * 0.05;
-  avg += texture2D(u_curr, v_uv + vec2( u_texel.x,  u_texel.y)).r * 0.05;
-
-  // Verlet integration
-  float val = avg * 2.0 - prev;
-
-  // Non-linear damping
-  float ampFactor = 1.0 - smoothstep(0.0, 0.08, abs(val)) * 0.006;
-  val *= u_damping * ampFactor;
-
-  // No ambient noise — water stays perfectly calm until touched
-
-  // Finger interaction
-  float aspect = u_texel.y / u_texel.x;
-  vec2 uvAspect = vec2(v_uv.x, v_uv.y * aspect);
-  float baseRadius = 0.028 * u_radius;
-  float totalForce = 0.0;
-
-  for(int i = 0; i < 10; i++){
-    if(u_fingers[i].z < 0.5) continue;
-    vec2 fa = vec2(u_fingers[i].x, u_fingers[i].y * aspect);
-    vec2 fb = vec2(u_prevFingers[i].x, u_prevFingers[i].y * aspect);
-    if(u_prevFingers[i].z < 0.5) fb = fa;
-
-    float d = capsuleSDF(uvAspect, fa, fb);
-    float vel = length(fa - fb);
-    float velGate = smoothstep(0.003, 0.015, vel);
-    float force = velGate * (0.6 + clamp(vel * 12.0, 0.0, 1.2));
-
-    if(d < baseRadius){
-      float strength = smoothstep(baseRadius, baseRadius * 0.3, d) * force;
-      totalForce += strength;
-    }
-  }
-  totalForce = clamp(totalForce, 0.0, 1.8);
-  val += totalForce * 0.15;
-
-  gl_FragColor = vec4(val, 0.0, 0.0, 1.0);
-}`;
-
-// --- Render shader ---
-const renderFS = `
-precision highp float;
-uniform sampler2D u_sim;
-uniform sampler2D u_camera;
-uniform vec2 u_texel;
-uniform vec2 u_simTexel;
-uniform float u_intensity;
-uniform float u_mode;
-uniform float u_aspect;
-uniform float u_mirror;
-varying vec2 v_uv;
-
-void main(){
-  // Read simulation data
-  float data = texture2D(u_sim, v_uv).r;
-
-  // Sobel gradient
-  float tl = texture2D(u_sim, v_uv + vec2(-u_simTexel.x, -u_simTexel.y)).r;
-  float tc = texture2D(u_sim, v_uv + vec2(0.0, -u_simTexel.y)).r;
-  float tr = texture2D(u_sim, v_uv + vec2( u_simTexel.x, -u_simTexel.y)).r;
-  float ml = texture2D(u_sim, v_uv + vec2(-u_simTexel.x, 0.0)).r;
-  float mr = texture2D(u_sim, v_uv + vec2( u_simTexel.x, 0.0)).r;
-  float bl = texture2D(u_sim, v_uv + vec2(-u_simTexel.x,  u_simTexel.y)).r;
-  float bc = texture2D(u_sim, v_uv + vec2(0.0,  u_simTexel.y)).r;
-  float br = texture2D(u_sim, v_uv + vec2( u_simTexel.x,  u_simTexel.y)).r;
-
-  float dx = (tr + 2.0*mr + br) - (tl + 2.0*ml + bl);
-  float dy = (bl + 2.0*bc + br) - (tl + 2.0*tc + tr);
-  vec2 grad = vec2(dx, dy);
-  float gradLen = length(grad);
-
-  // Laplacian
-  float lap = (tc + bc + ml + mr) * 0.25 - data;
-
-  vec2 aspectVec = vec2(1.0, u_aspect);
-
-  // ---- CRYSTAL MODE ----
-  float crystalMix = step(0.5, u_mode);
-
-  // Crystal: quantized facets
-  vec2 facetGrad = floor(grad * 18.0) / 18.0;
-  vec2 crystalOffset = facetGrad * 0.4 * u_intensity * aspectVec;
-
-  // Crystal edge detection
-  vec2 nfg1 = floor(texture2D(u_sim, v_uv + vec2(u_simTexel.x, 0.0)).r * 18.0 * vec2(1.0)) / 18.0;
-  float edgeDiff = length(facetGrad - vec2(
-    floor(texture2D(u_sim, v_uv + vec2(u_simTexel.x,0.0)).r * 18.0)/18.0,
-    floor(texture2D(u_sim, v_uv + vec2(0.0,u_simTexel.y)).r * 18.0)/18.0
-  ));
-  float crystalEdge = smoothstep(0.0, 0.02, edgeDiff);
-
-  // ---- LIQUID MODE ----
-  // Refraction
-  vec2 refractOffset = grad * 0.35 * u_intensity * aspectVec;
-
-  // Lens curvature
-  vec2 lensOffset = vec2(0.0);
-  if(gradLen > 0.001){
-    lensOffset = normalize(grad) * lap * 0.10 * u_intensity * aspectVec;
-  }
-  vec2 totalOffset = refractOffset + lensOffset;
-
-  // Chromatic aberration
-  float dispersion = 0.008 + clamp(gradLen * 0.10, 0.0, 0.06);
-
-  // Pick offset based on mode
-  vec2 finalOffset = mix(totalOffset, crystalOffset, crystalMix);
-  float finalDisp = mix(dispersion, 0.005, crystalMix);
-
-  // Mirror for front camera
-  vec2 camUV = vec2(mix(v_uv.x, 1.0 - v_uv.x, u_mirror), v_uv.y);
-
-  // Sample camera with chromatic aberration
-  vec2 uvR = camUV + finalOffset * (1.0 + finalDisp);
-  vec2 uvG = camUV + finalOffset;
-  vec2 uvB = camUV + finalOffset * (1.0 - finalDisp);
-
-  // 3-tap soft sampling per channel
-  vec2 softDir = normalize(finalOffset + 0.0001) * u_texel * 1.5;
-  float r = (texture2D(u_camera, uvR).r + texture2D(u_camera, uvR + softDir).r + texture2D(u_camera, uvR - softDir).r) / 3.0;
-  float g = (texture2D(u_camera, uvG).g + texture2D(u_camera, uvG + softDir).g + texture2D(u_camera, uvG - softDir).g) / 3.0;
-  float b = (texture2D(u_camera, uvB).b + texture2D(u_camera, uvB + softDir).b + texture2D(u_camera, uvB - softDir).b) / 3.0;
-  vec3 color = vec3(r, g, b);
-
-  // Wave depth brightness (liquid)
-  float brightness = 1.0 + clamp(data * 2.2, -0.38, 0.45);
-  vec3 warmTint = mix(vec3(1.0), vec3(1.06, 1.02, 0.94), smoothstep(0.0, 0.1, data));
-  vec3 coolTint = mix(vec3(1.0), vec3(0.78, 0.90, 1.08), smoothstep(0.0, 0.1, -data));
-  vec3 depthTint = mix(coolTint, warmTint, step(0.0, data));
-
-  color *= mix(brightness * depthTint, vec3(1.0), crystalMix * 0.5);
-
-  // Fresnel reflection (liquid)
-  vec3 normal = normalize(vec3(-grad.x, -grad.y, 0.8 / (u_intensity + 0.01)));
-  float cosTheta = max(normal.z, 0.0);
-  float fresnel = 0.02 + 0.98 * pow(1.0 - cosTheta, 5.0);
-  vec2 reflUV = camUV + totalOffset * -1.6 * aspectVec;
-  vec3 reflColor = texture2D(u_camera, reflUV).rgb * vec3(0.85, 0.92, 1.1);
-  color = mix(color, mix(color, reflColor, fresnel), 1.0 - crystalMix);
-
-  // Specular highlights
-  vec3 lightDir = normalize(vec3(0.4, 0.7, 1.0));
-  vec3 viewDir = vec3(0.0, 0.0, 1.0);
-  vec3 halfDir = normalize(lightDir + viewDir);
-  float NdotH = max(dot(normal, halfDir), 0.0);
-  float sharpSpec = pow(NdotH, 180.0) * 2.2;
-  float broadSheen = pow(NdotH, 28.0) * 0.35;
-  float spec = sharpSpec + broadSheen;
-  color += vec3(spec) * mix(1.0, 0.7, crystalMix);
-
-  // Caustics (liquid only)
-  float causticMask = smoothstep(0.04, 0.10, data) * smoothstep(0.01, 0.06, lap);
-  color += vec3(1.0, 0.97, 0.9) * causticMask * 0.6 * (1.0 - crystalMix);
-
-  // Crystal edge highlight
-  color += vec3(0.75, 0.90, 1.0) * crystalEdge * 0.4 * crystalMix;
-
-  // Crystal facet brightness variation
-  float facetBright = 1.0 + dot(facetGrad, vec2(0.3, 0.5)) * 0.3;
-  color *= mix(1.0, facetBright, crystalMix);
-
-  // Blend between clean camera and effect based on wave activity
-  float activity = smoothstep(0.001, 0.012, abs(data) + gradLen * 0.3);
-  vec3 cleanCam = texture2D(u_camera, camUV).rgb;
-  color = mix(cleanCam, color, activity);
-
-  gl_FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
-}`;
-
-// --- GL setup ---
+// ===== Shared Geometry =====
 const quadBuf = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
 
+// ===== Shader Utils =====
+function compileShader(src,type){
+  const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))console.error(gl.getShaderInfoLog(s),src);
+  return s;
+}
+function createProgram(vs,fs){
+  const p=gl.createProgram();
+  gl.attachShader(p,compileShader(vs,gl.VERTEX_SHADER));
+  gl.attachShader(p,compileShader(fs,gl.FRAGMENT_SHADER));
+  gl.linkProgram(p);return p;
+}
+function getU(prog,names){const u={};names.forEach(n=>u[n]=gl.getUniformLocation(prog,n));return u;}
+function setupA(prog){
+  const l=gl.getAttribLocation(prog,'a_pos');gl.enableVertexAttribArray(l);
+  gl.vertexAttribPointer(l,2,gl.FLOAT,false,0,0);
+}
+
+// ===== Vertex Shader (shared) =====
+const quadVS=`attribute vec2 a_pos;varying vec2 v_uv;
+void main(){v_uv=a_pos*0.5+0.5;gl_Position=vec4(a_pos,0.0,1.0);}`;
+
+// ===== Tear/Reveal Fragment Shader =====
+const tearFS=`precision highp float;
+uniform sampler2D u_camera;
+uniform sampler2D u_ocean;
+uniform float u_tearY;
+uniform float u_tearTilt;
+uniform float u_tearActive;
+uniform float u_time;
+uniform float u_mirror;
+varying vec2 v_uv;
+
+float hash(float n){return fract(sin(n)*43758.5453);}
+float noise(float x){float i=floor(x),f=fract(x);return mix(hash(i),hash(i+1.0),f*f*(3.0-2.0*f));}
+float fbm(float x){float v=0.0,a=0.5;for(int i=0;i<5;i++){v+=a*noise(x);x*=2.07;a*=0.49;}return v;}
+
+void main(){
+  vec2 uv=v_uv;
+  vec2 camUV=vec2(mix(uv.x,1.0-uv.x,u_mirror),uv.y);
+  vec4 cam=texture2D(u_camera,camUV);
+  if(u_tearActive<0.001){gl_FragColor=cam;return;}
+  vec4 ocean=texture2D(u_ocean,uv);
+
+  // Tear line with organic noise + tilt
+  float n=(fbm(uv.x*7.0+u_time*0.15)-0.5)*0.035;
+  n+=(fbm(uv.x*18.0+u_time*0.08+11.0)-0.5)*0.012;
+  float lineY=u_tearY + u_tearTilt*(uv.x-0.5) + n;
+
+  // Signed distance (positive = below line = camera side)
+  float dist=uv.y-lineY;
+
+  // Smooth blend at edge
+  float edge=0.004;
+  float blend=smoothstep(-edge,edge,dist);
+
+  // Edge foam (white highlight)
+  float foam=exp(-abs(dist)*300.0)*0.4*u_tearActive;
+  // Shadow on camera side
+  float shadow=exp(-max(dist,0.0)*120.0)*0.1*u_tearActive;
+  // Slight fold shine on ocean side
+  float shine=exp(-max(-dist,0.0)*180.0)*0.08*u_tearActive;
+
+  vec4 color=mix(ocean,cam,blend);
+  color.rgb+=foam*vec3(0.92,0.96,1.0);
+  color.rgb-=shadow*vec3(0.15,0.12,0.08);
+  color.rgb+=shine*vec3(0.06,0.08,0.12);
+
+  color=mix(cam,color,u_tearActive);
+  gl_FragColor=vec4(clamp(color.rgb,0.0,1.0),1.0);
+}`;
+
+// ===== Water Ripple Shaders =====
+const simFS=`precision highp float;
+uniform sampler2D u_prev;uniform sampler2D u_curr;uniform vec2 u_texel;
+uniform float u_damping;uniform vec3 u_fingers[10];uniform vec3 u_prevFingers[10];
+uniform float u_radius;uniform float u_time;varying vec2 v_uv;
+float capsuleSDF(vec2 p,vec2 a,vec2 b){vec2 pa=p-a,ba=b-a;float h=clamp(dot(pa,ba)/dot(ba,ba),0.0,1.0);return length(pa-ba*h);}
+void main(){
+  float prev=texture2D(u_prev,v_uv).r;float curr=texture2D(u_curr,v_uv).r;
+  float avg=0.0;
+  avg+=texture2D(u_curr,v_uv+vec2(-u_texel.x,0.0)).r*0.2;
+  avg+=texture2D(u_curr,v_uv+vec2(u_texel.x,0.0)).r*0.2;
+  avg+=texture2D(u_curr,v_uv+vec2(0.0,-u_texel.y)).r*0.2;
+  avg+=texture2D(u_curr,v_uv+vec2(0.0,u_texel.y)).r*0.2;
+  avg+=texture2D(u_curr,v_uv+vec2(-u_texel.x,-u_texel.y)).r*0.05;
+  avg+=texture2D(u_curr,v_uv+vec2(u_texel.x,-u_texel.y)).r*0.05;
+  avg+=texture2D(u_curr,v_uv+vec2(-u_texel.x,u_texel.y)).r*0.05;
+  avg+=texture2D(u_curr,v_uv+vec2(u_texel.x,u_texel.y)).r*0.05;
+  float val=avg*2.0-prev;
+  float ampFactor=1.0-smoothstep(0.0,0.08,abs(val))*0.006;
+  val*=u_damping*ampFactor;
+  float aspect=u_texel.y/u_texel.x;vec2 uvA=vec2(v_uv.x,v_uv.y*aspect);
+  float baseRadius=0.028*u_radius;float totalForce=0.0;
+  for(int i=0;i<10;i++){
+    if(u_fingers[i].z<0.5)continue;
+    vec2 fa=vec2(u_fingers[i].x,u_fingers[i].y*aspect);
+    vec2 fb=vec2(u_prevFingers[i].x,u_prevFingers[i].y*aspect);
+    if(u_prevFingers[i].z<0.5)fb=fa;
+    float d=capsuleSDF(uvA,fa,fb);float vel=length(fa-fb);
+    float velGate=smoothstep(0.003,0.015,vel);
+    float force=velGate*(0.6+clamp(vel*12.0,0.0,1.2));
+    if(d<baseRadius){totalForce+=smoothstep(baseRadius,baseRadius*0.3,d)*force;}
+  }
+  val+=clamp(totalForce,0.0,1.8)*0.15;
+  gl_FragColor=vec4(val,0.0,0.0,1.0);
+}`;
+
+const renderFS=`precision highp float;
+uniform sampler2D u_sim;uniform sampler2D u_camera;uniform vec2 u_texel;uniform vec2 u_simTexel;
+uniform float u_intensity;uniform float u_aspect;uniform float u_mirror;varying vec2 v_uv;
+void main(){
+  float data=texture2D(u_sim,v_uv).r;
+  float tl=texture2D(u_sim,v_uv+vec2(-u_simTexel.x,-u_simTexel.y)).r;
+  float tc=texture2D(u_sim,v_uv+vec2(0.0,-u_simTexel.y)).r;
+  float tr=texture2D(u_sim,v_uv+vec2(u_simTexel.x,-u_simTexel.y)).r;
+  float ml=texture2D(u_sim,v_uv+vec2(-u_simTexel.x,0.0)).r;
+  float mr=texture2D(u_sim,v_uv+vec2(u_simTexel.x,0.0)).r;
+  float bl=texture2D(u_sim,v_uv+vec2(-u_simTexel.x,u_simTexel.y)).r;
+  float bc=texture2D(u_sim,v_uv+vec2(0.0,u_simTexel.y)).r;
+  float br=texture2D(u_sim,v_uv+vec2(u_simTexel.x,u_simTexel.y)).r;
+  float dx=(tr+2.0*mr+br)-(tl+2.0*ml+bl);
+  float dy=(bl+2.0*bc+br)-(tl+2.0*tc+tr);
+  vec2 grad=vec2(dx,dy);float gradLen=length(grad);
+  float lap=(tc+bc+ml+mr)*0.25-data;
+  vec2 aspectVec=vec2(1.0,u_aspect);
+  vec2 refractOff=grad*0.35*u_intensity*aspectVec;
+  vec2 lensOff=vec2(0.0);
+  if(gradLen>0.001)lensOff=normalize(grad)*lap*0.10*u_intensity*aspectVec;
+  vec2 totalOff=refractOff+lensOff;
+  float disp=0.008+clamp(gradLen*0.10,0.0,0.06);
+  vec2 camUV=vec2(mix(v_uv.x,1.0-v_uv.x,u_mirror),v_uv.y);
+  vec2 uvR=camUV+totalOff*(1.0+disp);vec2 uvG=camUV+totalOff;vec2 uvB=camUV+totalOff*(1.0-disp);
+  vec2 softDir=normalize(totalOff+0.0001)*u_texel*1.5;
+  float r=(texture2D(u_camera,uvR).r+texture2D(u_camera,uvR+softDir).r+texture2D(u_camera,uvR-softDir).r)/3.0;
+  float g=(texture2D(u_camera,uvG).g+texture2D(u_camera,uvG+softDir).g+texture2D(u_camera,uvG-softDir).g)/3.0;
+  float b=(texture2D(u_camera,uvB).b+texture2D(u_camera,uvB+softDir).b+texture2D(u_camera,uvB-softDir).b)/3.0;
+  vec3 color=vec3(r,g,b);
+  float brightness=1.0+clamp(data*2.2,-0.38,0.45);
+  vec3 warmT=mix(vec3(1.0),vec3(1.06,1.02,0.94),smoothstep(0.0,0.1,data));
+  vec3 coolT=mix(vec3(1.0),vec3(0.78,0.90,1.08),smoothstep(0.0,0.1,-data));
+  color*=brightness*mix(coolT,warmT,step(0.0,data));
+  vec3 normal=normalize(vec3(-grad.x,-grad.y,0.8/(u_intensity+0.01)));
+  float cosT=max(normal.z,0.0);float fresnel=0.02+0.98*pow(1.0-cosT,5.0);
+  vec2 reflUV=camUV+totalOff*-1.6*aspectVec;
+  vec3 reflC=texture2D(u_camera,reflUV).rgb*vec3(0.85,0.92,1.1);
+  color=mix(color,reflC,fresnel);
+  vec3 lightDir=normalize(vec3(0.4,0.7,1.0));vec3 halfDir=normalize(lightDir+vec3(0,0,1));
+  float NdotH=max(dot(normal,halfDir),0.0);
+  color+=vec3(pow(NdotH,180.0)*2.2+pow(NdotH,28.0)*0.35);
+  float causticM=smoothstep(0.04,0.10,data)*smoothstep(0.01,0.06,lap);
+  color+=vec3(1.0,0.97,0.9)*causticM*0.6;
+  float activity=smoothstep(0.001,0.012,abs(data)+gradLen*0.3);
+  vec3 cleanCam=texture2D(u_camera,camUV).rgb;
+  color=mix(cleanCam,color,activity);
+  gl_FragColor=vec4(clamp(color,0.0,1.0),1.0);
+}`;
+
+// ===== Create Programs =====
+const tearProg = createProgram(quadVS, tearFS);
+const tearU = getU(tearProg, ['u_camera','u_ocean','u_tearY','u_tearTilt','u_tearActive','u_time','u_mirror']);
+
 const simProg = createProgram(quadVS, simFS);
-const renderProg = createProgram(quadVS, renderFS);
+const simU = getU(simProg, ['u_prev','u_curr','u_texel','u_damping','u_fingers','u_prevFingers','u_radius','u_time']);
 
-function getUniforms(prog, names){
-  const u = {};
-  names.forEach(n => u[n] = gl.getUniformLocation(prog, n));
-  return u;
+const renProg = createProgram(quadVS, renderFS);
+const renU = getU(renProg, ['u_sim','u_camera','u_texel','u_simTexel','u_intensity','u_aspect','u_mirror']);
+
+// ===== Textures =====
+let camTex, oceanTex;
+let simFBOs = [];
+
+function createTex(){
+  const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  return t;
 }
-const simU = getUniforms(simProg, ['u_prev','u_curr','u_texel','u_damping','u_fingers','u_prevFingers','u_radius','u_time']);
-const renU = getUniforms(renderProg, ['u_sim','u_camera','u_texel','u_simTexel','u_intensity','u_mode','u_aspect','u_mirror']);
-
-function setupAttrib(prog){
-  const loc = gl.getAttribLocation(prog, 'a_pos');
-  gl.enableVertexAttribArray(loc);
-  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-}
-
-// --- FBO creation ---
-const texType = extFloat ? gl.FLOAT : (extHalf ? extHalf.HALF_FLOAT_OES : gl.UNSIGNED_BYTE);
-
-function createFBO(w, h){
-  const fb = gl.createFramebuffer();
-  const tex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, texType, null);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  return {fb, tex, w, h};
+function createFBO(w,h){
+  const fb=gl.createFramebuffer(),tex=createTex();
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,texType,null);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  return{fb,tex,w,h};
 }
 
-let simFBOs = []; // [prev, curr, next]
-let camTex;
+// ===== Ocean Texture Generation =====
+function generateOceanTexture(){
+  const oc=document.createElement('canvas');
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  const w=oc.width=Math.floor(window.innerWidth*dpr);
+  const h=oc.height=Math.floor(window.innerHeight*dpr);
+  const c=oc.getContext('2d');
 
-function initFBOs(){
-  W = canvas.width; H = canvas.height;
-  simW = Math.floor(W * 0.75); simH = Math.floor(H * 0.75);
-  simFBOs = [createFBO(simW, simH), createFBO(simW, simH), createFBO(simW, simH)];
-  if(camTex) gl.deleteTexture(camTex);
-  camTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, camTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-}
+  // Sky
+  const sky=c.createLinearGradient(0,0,0,h*0.42);
+  sky.addColorStop(0,'#5BA3D9');sky.addColorStop(0.5,'#7BC0E8');sky.addColorStop(1,'#A8DDF0');
+  c.fillStyle=sky;c.fillRect(0,0,w,h*0.42);
 
-function resize(){
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width = Math.floor(window.innerWidth * dpr);
-  canvas.height = Math.floor(window.innerHeight * dpr);
-  initFBOs();
-}
-window.addEventListener('resize', resize);
-
-// --- Touch fallback (for devices without hand tracking) ---
-const touchPoints = [];
-canvas.addEventListener('touchstart', e=>{e.preventDefault(); updateTouch(e)}, {passive:false});
-canvas.addEventListener('touchmove', e=>{e.preventDefault(); updateTouch(e)}, {passive:false});
-canvas.addEventListener('touchend', e=>{e.preventDefault(); touchPoints.length=0; updateFingersFromTouch()}, {passive:false});
-canvas.addEventListener('mousedown', e=>{touchPoints[0]={x:e.clientX/window.innerWidth, y:e.clientY/window.innerHeight}; updateFingersFromTouch()});
-canvas.addEventListener('mousemove', e=>{if(e.buttons){touchPoints[0]={x:e.clientX/window.innerWidth, y:e.clientY/window.innerHeight}; updateFingersFromTouch()}});
-canvas.addEventListener('mouseup', ()=>{touchPoints.length=0; updateFingersFromTouch()});
-
-function updateTouch(e){
-  touchPoints.length = 0;
-  for(let i=0;i<e.touches.length && i<10;i++){
-    touchPoints.push({x:e.touches[i].clientX/window.innerWidth, y:e.touches[i].clientY/window.innerHeight});
+  // Soft clouds
+  c.globalAlpha=0.06;c.fillStyle='#fff';
+  for(let i=0;i<12;i++){
+    const cx=(Math.sin(i*7.3)*0.5+0.5)*w;
+    const cy=(Math.sin(i*3.1)*0.5+0.3)*h*0.35;
+    c.beginPath();c.ellipse(cx,cy,50+Math.sin(i*5)*60,12+Math.sin(i*9)*8,0.1*i,0,Math.PI*2);c.fill();
   }
-  updateFingersFromTouch();
-}
-function updateFingersFromTouch(){
-  if(handsReady) return; // prefer hand tracking
-  prevFingers.set(fingers);
-  fingers.fill(0);
-  for(let i=0;i<touchPoints.length && i<10;i++){
-    fingers[i*3] = touchPoints[i].x;
-    fingers[i*3+1] = touchPoints[i].y;
-    fingers[i*3+2] = 1.0;
+  c.globalAlpha=1;
+
+  // Distant mountains
+  c.fillStyle='#3a8a9a';c.globalAlpha=0.3;
+  c.beginPath();c.moveTo(0,h*0.42);
+  for(let i=0;i<=20;i++){
+    const x=(i/20)*w;
+    const peak=h*0.35+Math.sin(i*0.8+1)*h*0.03+Math.sin(i*1.7)*h*0.02;
+    c.lineTo(x,peak);
   }
-}
+  c.lineTo(w,h*0.42);c.closePath();c.fill();c.globalAlpha=1;
 
-// --- MediaPipe Hands ---
-let Hands, Camera;
-async function loadMediaPipe(){
-  try {
-    await new Promise(r => {
-      const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js';
-      script.onload = r;
-      document.head.appendChild(script);
-    });
-    await new Promise(r => {
-      const script2 = document.createElement('script');
-      script2.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js';
-      script2.onload = r;
-      document.head.appendChild(script2);
-    });
+  // Ocean body
+  const sea=c.createLinearGradient(0,h*0.42,0,h);
+  sea.addColorStop(0,'#1DB4B0');sea.addColorStop(0.12,'#179E9F');
+  sea.addColorStop(0.35,'#0D7A8A');sea.addColorStop(0.7,'#085E72');sea.addColorStop(1,'#04455E');
+  c.fillStyle=sea;c.fillRect(0,h*0.42,w,h*0.58);
 
-    const hands = new window.Hands({locateFile: f =>
-      `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`
-    });
-    hands.setOptions({
-      maxNumHands: 2,
-      modelComplexity: 0,
-      minDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5
-    });
-    hands.onResults(onHandResults);
+  // Horizon highlight
+  const hg=c.createLinearGradient(0,h*0.41,0,h*0.45);
+  hg.addColorStop(0,'rgba(180,230,240,0.3)');hg.addColorStop(1,'rgba(180,230,240,0)');
+  c.fillStyle=hg;c.fillRect(0,h*0.41,w,h*0.04);
 
-    const camera = new window.Camera(video, {
-      onFrame: async () => { await hands.send({image: video}); },
-      width: 640, height: 480
-    });
-    camera.start();
-    handsReady = true;
-    console.log('MediaPipe Hands loaded');
-  } catch(e){
-    console.warn('MediaPipe failed, using touch fallback:', e);
-  }
-}
-
-const FINGERTIPS = [4, 8, 12, 16, 20]; // thumb + 4 fingers
-
-function onHandResults(results){
-  prevFingers.set(fingers);
-  fingers.fill(0);
-
-  if(!results.multiHandLandmarks) return;
-  let idx = 0;
-  for(let h = 0; h < results.multiHandLandmarks.length && h < 2; h++){
-    const lm = results.multiHandLandmarks[h];
-    for(let f = 0; f < FINGERTIPS.length; f++){
-      const tip = lm[FINGERTIPS[f]];
-      let sx = tip.x;
-      // Mirror for front camera
-      if(facingMode === 'user') sx = 1.0 - sx;
-      fingers[idx*3] = sx;
-      fingers[idx*3+1] = tip.y;
-      fingers[idx*3+2] = 1.0;
-      idx++;
-      if(idx >= 10) break;
+  // Wave lines
+  for(let j=0;j<35;j++){
+    const y=h*0.44+j*h*0.016;
+    const alpha=0.04+(1-j/35)*0.06;
+    c.strokeStyle=`rgba(255,255,255,${alpha})`;c.lineWidth=0.8;
+    c.beginPath();
+    for(let x=0;x<w;x+=3){
+      const dy=Math.sin(x*0.007+j*2.5)*2.5+Math.sin(x*0.019+j*1.3+3)*1.2;
+      if(x===0)c.moveTo(x,y+dy);else c.lineTo(x,y+dy);
     }
-    if(idx >= 10) break;
+    c.stroke();
+  }
+
+  // Sparkles
+  c.fillStyle='rgba(255,255,255,0.25)';
+  for(let i=0;i<80;i++){
+    const sx=Math.sin(i*73.1)*0.5*w+w*0.5;
+    const sy=h*0.46+Math.sin(i*97.3)*0.5*h*0.48+h*0.24;
+    c.beginPath();c.arc(sx,sy,0.5+Math.sin(i*11)*1.2,0,Math.PI*2);c.fill();
+  }
+
+  // Upload to GL texture
+  if(oceanTex)gl.deleteTexture(oceanTex);
+  oceanTex=createTex();
+  gl.bindTexture(gl.TEXTURE_2D,oceanTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,oc);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
+}
+
+// ===== Custom media upload =====
+let customMediaTex=null;
+let customMediaVideo=null;
+document.getElementById('upload-btn').onclick=()=>document.getElementById('media-input').click();
+document.getElementById('media-input').onchange=function(e){
+  const file=e.target.files[0];if(!file)return;
+  if(file.type.startsWith('video/')){
+    const vid=document.createElement('video');
+    vid.src=URL.createObjectURL(file);vid.loop=true;vid.muted=true;vid.playsInline=true;
+    vid.onloadeddata=()=>{vid.play();customMediaVideo=vid;uploadCustomMedia(vid);};
+  } else {
+    const img=new Image();img.onload=()=>{customMediaVideo=null;uploadCustomMedia(img);};
+    img.src=URL.createObjectURL(file);
+  }
+};
+function uploadCustomMedia(source){
+  if(!customMediaTex)customMediaTex=createTex();
+  gl.bindTexture(gl.TEXTURE_2D,customMediaTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,source);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
+}
+
+// ===== Camera =====
+const video=document.createElement('video');
+video.setAttribute('playsinline','');video.muted=true;
+async function startCamera(facing){
+  if(video.srcObject)video.srcObject.getTracks().forEach(t=>t.stop());
+  const stream=await navigator.mediaDevices.getUserMedia({
+    video:{facingMode:facing,width:{ideal:1280},height:{ideal:720}},audio:false
+  });
+  video.srcObject=stream;await video.play();videoReady=true;
+}
+
+// ===== Resize =====
+function initFBOs(){
+  simW=Math.floor(W*0.75);simH=Math.floor(H*0.75);
+  simFBOs=[createFBO(simW,simH),createFBO(simW,simH),createFBO(simW,simH)];
+}
+function resize(){
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  W=canvas.width=Math.floor(window.innerWidth*dpr);
+  H=canvas.height=Math.floor(window.innerHeight*dpr);
+  if(camTex)gl.deleteTexture(camTex);
+  camTex=createTex();
+  initFBOs();
+  generateOceanTexture();
+}
+window.addEventListener('resize',resize);
+
+// ===== Hand Tracking State =====
+const fingers=new Float32Array(30);
+const prevFingers=new Float32Array(30);
+// Tear mode: palm center
+let palmX=0.5, palmY=0.5;
+let smoothPalmY=1.0; // start at 1 = no tear visible
+let smoothPalmX=0.5;
+let tearActive=0;
+let handDetected=false;
+let handSpeed=0;
+
+// ===== Touch Handling =====
+const touchPts=[];
+let touchTearY=1.0;
+canvas.addEventListener('touchstart',e=>{e.preventDefault();handleTouch(e)},{passive:false});
+canvas.addEventListener('touchmove',e=>{e.preventDefault();handleTouch(e)},{passive:false});
+canvas.addEventListener('touchend',e=>{e.preventDefault();touchPts.length=0;handleTouchEnd()},{passive:false});
+canvas.addEventListener('mousedown',e=>{touchPts[0]={x:e.clientX/innerWidth,y:e.clientY/innerHeight};handleTouch(null)});
+canvas.addEventListener('mousemove',e=>{if(e.buttons){touchPts[0]={x:e.clientX/innerWidth,y:e.clientY/innerHeight};handleTouch(null)}});
+canvas.addEventListener('mouseup',()=>{touchPts.length=0;handleTouchEnd()});
+
+function handleTouch(e){
+  if(e){
+    touchPts.length=0;
+    for(let i=0;i<e.touches.length&&i<10;i++)
+      touchPts.push({x:e.touches[i].clientX/innerWidth,y:e.touches[i].clientY/innerHeight});
+  }
+  if(currentMode==='reveal'&&touchPts.length>0){
+    touchTearY=touchPts[0].y;
+  }
+  if(!handsReady||currentMode==='ripple'){
+    prevFingers.set(fingers);fingers.fill(0);
+    for(let i=0;i<touchPts.length&&i<10;i++){
+      fingers[i*3]=touchPts[i].x;fingers[i*3+1]=touchPts[i].y;fingers[i*3+2]=1.0;
+    }
+  }
+}
+function handleTouchEnd(){
+  if(currentMode==='reveal')touchTearY=1.0;
+  if(!handsReady){prevFingers.set(fingers);fingers.fill(0);}
+}
+
+// ===== MediaPipe Hands =====
+const TIPS=[4,8,12,16,20];
+async function loadMediaPipe(){
+  try{
+    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js');
+    await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js');
+    const hands=new window.Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`});
+    hands.setOptions({maxNumHands:2,modelComplexity:0,minDetectionConfidence:0.5,minTrackingConfidence:0.5});
+    hands.onResults(onHandResults);
+    const cam=new window.Camera(video,{onFrame:async()=>{await hands.send({image:video})},width:640,height:480});
+    cam.start();handsReady=true;
+  }catch(e){console.warn('MediaPipe failed, touch fallback:',e)}
+}
+function loadScript(url){return new Promise(r=>{const s=document.createElement('script');s.src=url;s.onload=r;document.head.appendChild(s)})}
+
+function onHandResults(res){
+  prevFingers.set(fingers);fingers.fill(0);
+  handDetected=false;
+  if(!res.multiHandLandmarks||!res.multiHandLandmarks.length)return;
+  handDetected=true;
+
+  const lm=res.multiHandLandmarks[0];
+
+  // Palm center for tear mode (average of wrist + MCP joints)
+  let cx=0,cy=0;
+  const palmIndices=[0,5,9,13,17];
+  for(const pi of palmIndices){cx+=lm[pi].x;cy+=lm[pi].y;}
+  cx/=palmIndices.length;cy/=palmIndices.length;
+  if(facingMode==='user')cx=1-cx;
+  const prevPX=palmX,prevPY=palmY;
+  palmX=cx;palmY=cy;
+  handSpeed=Math.sqrt((palmX-prevPX)**2+(palmY-prevPY)**2);
+
+  // Fingertips for ripple mode
+  let idx=0;
+  for(let h=0;h<res.multiHandLandmarks.length&&h<2;h++){
+    const hand=res.multiHandLandmarks[h];
+    for(let f=0;f<TIPS.length;f++){
+      const tip=hand[TIPS[f]];
+      let sx=tip.x;if(facingMode==='user')sx=1-sx;
+      fingers[idx*3]=sx;fingers[idx*3+1]=tip.y;fingers[idx*3+2]=1.0;
+      idx++;if(idx>=10)break;
+    }
+    if(idx>=10)break;
   }
 }
 
-// --- Render loop ---
-let time = 0;
+// ===== Tear Mode Render =====
+function renderTear(){
+  // Update tear position
+  let targetY;
+  if(handDetected&&handsReady){
+    targetY=palmY;
+    tearActive=Math.min(tearActive+0.06,1.0);
+  } else if(touchPts.length>0){
+    targetY=touchTearY;
+    tearActive=Math.min(tearActive+0.08,1.0);
+  } else {
+    targetY=1.0;
+    tearActive=Math.max(tearActive-0.025,0.0);
+  }
+
+  smoothPalmY+=(targetY-smoothPalmY)*0.12;
+  smoothPalmX+=(palmX-smoothPalmX)*0.12;
+
+  // Update custom media video texture
+  if(customMediaVideo&&customMediaVideo.readyState>=2){
+    uploadCustomMedia(customMediaVideo);
+  }
+
+  const activeTex=customMediaTex||oceanTex;
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.viewport(0,0,W,H);
+  gl.useProgram(tearProg);
+  gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf);setupA(tearProg);
+
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,camTex);gl.uniform1i(tearU.u_camera,0);
+  gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,activeTex);gl.uniform1i(tearU.u_ocean,1);
+
+  gl.uniform1f(tearU.u_tearY,smoothPalmY);
+  gl.uniform1f(tearU.u_tearTilt,(smoothPalmX-0.5)*-0.3);
+  gl.uniform1f(tearU.u_tearActive,tearActive);
+  gl.uniform1f(tearU.u_time,time);
+  gl.uniform1f(tearU.u_mirror,facingMode==='user'?1.0:0.0);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+}
+
+// ===== Ripple Mode Render =====
+function renderRipple(){
+  // Physics sim
+  gl.useProgram(simProg);gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf);setupA(simProg);
+  gl.viewport(0,0,simW,simH);
+  for(let iter=0;iter<2;iter++){
+    const [prev,curr,next]=[simFBOs[0],simFBOs[1],simFBOs[2]];
+    gl.bindFramebuffer(gl.FRAMEBUFFER,next.fb);
+    gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,prev.tex);gl.uniform1i(simU.u_prev,0);
+    gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,curr.tex);gl.uniform1i(simU.u_curr,1);
+    gl.uniform2f(simU.u_texel,1/simW,1/simH);gl.uniform1f(simU.u_damping,0.975);
+    gl.uniform1f(simU.u_radius,1.0);gl.uniform1f(simU.u_time,time);
+    if(iter===0){gl.uniform3fv(simU.u_fingers,fingers);gl.uniform3fv(simU.u_prevFingers,prevFingers);}
+    else{const z=new Float32Array(30);gl.uniform3fv(simU.u_fingers,z);gl.uniform3fv(simU.u_prevFingers,z);}
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    simFBOs=[curr,next,prev];
+  }
+  // Render pass
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,W,H);
+  gl.useProgram(renProg);gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf);setupA(renProg);
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,simFBOs[1].tex);gl.uniform1i(renU.u_sim,0);
+  gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,camTex);gl.uniform1i(renU.u_camera,1);
+  gl.uniform2f(renU.u_texel,1/W,1/H);gl.uniform2f(renU.u_simTexel,1/simW,1/simH);
+  gl.uniform1f(renU.u_intensity,1.0);gl.uniform1f(renU.u_aspect,H/W);
+  gl.uniform1f(renU.u_mirror,facingMode==='user'?1.0:0.0);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+}
+
+// ===== Render Loop =====
 function render(){
   requestAnimationFrame(render);
-  if(!videoReady) return;
-
-  time += 0.016;
+  if(!videoReady)return;
+  time+=0.016;
 
   // Update camera texture
-  gl.activeTexture(gl.TEXTURE2);
-  gl.bindTexture(gl.TEXTURE_2D, camTex);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video); } catch(e){}
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,camTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
+  try{gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video)}catch(e){}
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
 
-  // --- Physics simulation pass (3 iterations) ---
-  gl.useProgram(simProg);
-  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-  setupAttrib(simProg);
-  gl.viewport(0, 0, simW, simH);
-
-  for(let iter = 0; iter < 2; iter++){
-    const prevFBO = simFBOs[0];
-    const currFBO = simFBOs[1];
-    const nextFBO = simFBOs[2];
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, nextFBO.fb);
-
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, prevFBO.tex);
-    gl.uniform1i(simU.u_prev, 0);
-
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, currFBO.tex);
-    gl.uniform1i(simU.u_curr, 1);
-
-    gl.uniform2f(simU.u_texel, 1.0/simW, 1.0/simH);
-    gl.uniform1f(simU.u_damping, 0.975);
-    gl.uniform1f(simU.u_radius, 1.0);
-    gl.uniform1f(simU.u_time, time);
-
-    // Only apply finger force on first iteration
-    if(iter === 0){
-      gl.uniform3fv(simU.u_fingers, fingers);
-      gl.uniform3fv(simU.u_prevFingers, prevFingers);
-    } else {
-      const zeros = new Float32Array(30);
-      gl.uniform3fv(simU.u_fingers, zeros);
-      gl.uniform3fv(simU.u_prevFingers, zeros);
-    }
-
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-    // Rotate FBOs: prev=curr, curr=next, next=prev
-    simFBOs[0] = currFBO;
-    simFBOs[1] = nextFBO;
-    simFBOs[2] = prevFBO;
-  }
-
-  // --- Render pass ---
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  gl.viewport(0, 0, W, H);
-  gl.useProgram(renderProg);
-  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-  setupAttrib(renderProg);
-
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, simFBOs[1].tex);
-  gl.uniform1i(renU.u_sim, 0);
-
-  gl.activeTexture(gl.TEXTURE1);
-  gl.bindTexture(gl.TEXTURE_2D, camTex);
-  gl.uniform1i(renU.u_camera, 1);
-
-  gl.uniform2f(renU.u_texel, 1.0/W, 1.0/H);
-  gl.uniform2f(renU.u_simTexel, 1.0/simW, 1.0/simH);
-  gl.uniform1f(renU.u_intensity, 1.0);
-  gl.uniform1f(renU.u_mode, mode);
-  gl.uniform1f(renU.u_aspect, H/W);
-  gl.uniform1f(renU.u_mirror, facingMode === 'user' ? 1.0 : 0.0);
-
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  if(currentMode==='reveal')renderTear();
+  else renderRipple();
 }
 
-// --- UI ---
-document.getElementById('btn-liquid').onclick = ()=>{
-  mode = 0.0;
-  document.getElementById('btn-liquid').classList.add('active');
-  document.getElementById('btn-crystal').classList.remove('active');
-};
-document.getElementById('btn-crystal').onclick = ()=>{
-  mode = 1.0;
-  document.getElementById('btn-crystal').classList.add('active');
-  document.getElementById('btn-liquid').classList.remove('active');
-};
-document.getElementById('flip-btn').onclick = async ()=>{
-  facingMode = facingMode === 'user' ? 'environment' : 'user';
+// ===== Mode Switching =====
+function setMode(m){
+  currentMode=m;
+  document.querySelectorAll('#mode-bar button').forEach(b=>b.classList.remove('active'));
+  document.getElementById(m==='reveal'?'m-reveal':'m-ripple').classList.add('active');
+  document.getElementById('hint').textContent=m==='reveal'?'Raise your hand to reveal ✨':'Touch or wave to make ripples 💧';
+  document.getElementById('upload-btn').style.display=m==='reveal'?'':'none';
+  tearActive=0;smoothPalmY=1.0;
+}
+document.getElementById('m-reveal').onclick=()=>setMode('reveal');
+document.getElementById('m-ripple').onclick=()=>setMode('ripple');
+
+// ===== Flip Camera =====
+document.getElementById('flip-btn').onclick=async()=>{
+  facingMode=facingMode==='user'?'environment':'user';
   await startCamera(facingMode);
 };
 
-// --- Init ---
+// ===== Init =====
 async function init(){
   resize();
   await startCamera(facingMode);
   document.getElementById('loading').classList.add('hide');
+  setTimeout(()=>{document.getElementById('hint').style.opacity='0'},4000);
   loadMediaPipe();
   render();
 }
