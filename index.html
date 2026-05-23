@@ -372,24 +372,27 @@ function resize(){
 }
 window.addEventListener('resize', resize);
 
-// --- Touch fallback (for devices without hand tracking) ---
+// --- Touch handling ---
 const touchPoints = [];
+let touchActive = false;
+let touchX = 0.5, touchY = 0.5;
 canvas.addEventListener('touchstart', e=>{e.preventDefault(); updateTouch(e)}, {passive:false});
 canvas.addEventListener('touchmove', e=>{e.preventDefault(); updateTouch(e)}, {passive:false});
-canvas.addEventListener('touchend', e=>{e.preventDefault(); touchPoints.length=0; updateFingersFromTouch()}, {passive:false});
-canvas.addEventListener('mousedown', e=>{touchPoints[0]={x:e.clientX/window.innerWidth, y:e.clientY/window.innerHeight}; updateFingersFromTouch()});
-canvas.addEventListener('mousemove', e=>{if(e.buttons){touchPoints[0]={x:e.clientX/window.innerWidth, y:e.clientY/window.innerHeight}; updateFingersFromTouch()}});
-canvas.addEventListener('mouseup', ()=>{touchPoints.length=0; updateFingersFromTouch()});
+canvas.addEventListener('touchend', e=>{e.preventDefault(); touchPoints.length=0; touchActive=false; updateFingersFromTouch()}, {passive:false});
+canvas.addEventListener('mousedown', e=>{touchPoints[0]={x:e.clientX/window.innerWidth, y:e.clientY/window.innerHeight}; touchActive=true; touchX=touchPoints[0].x; touchY=touchPoints[0].y; updateFingersFromTouch()});
+canvas.addEventListener('mousemove', e=>{if(e.buttons){touchPoints[0]={x:e.clientX/window.innerWidth, y:e.clientY/window.innerHeight}; touchX=touchPoints[0].x; touchY=touchPoints[0].y; updateFingersFromTouch()}});
+canvas.addEventListener('mouseup', ()=>{touchPoints.length=0; touchActive=false; updateFingersFromTouch()});
 
 function updateTouch(e){
   touchPoints.length = 0;
   for(let i=0;i<e.touches.length && i<10;i++){
     touchPoints.push({x:e.touches[i].clientX/window.innerWidth, y:e.touches[i].clientY/window.innerHeight});
   }
+  if(touchPoints.length>0){touchActive=true;touchX=touchPoints[0].x;touchY=touchPoints[0].y;}
   updateFingersFromTouch();
 }
 function updateFingersFromTouch(){
-  if(handsReady) return; // prefer hand tracking
+  if(handsReady) return; // prefer hand tracking for ripple mode
   prevFingers.set(fingers);
   fingers.fill(0);
   for(let i=0;i<touchPoints.length && i<10;i++){
@@ -541,10 +544,17 @@ function generateOceanTexture(){
 
 function renderTearMode(){
   let targetY;
+  let hasInput = false;
+  // Check hand tracking
   if(fingers[2]>0.5){
     let cx=0,cy=0,cnt=0;
     for(let i=0;i<10;i++){if(fingers[i*3+2]>0.5){cx+=fingers[i*3];cy+=fingers[i*3+1];cnt++;}}
     if(cnt>0){palmX=cx/cnt;palmY=cy/cnt;}
+    hasInput=true;
+  }
+  // Touch always works for reveal mode (even when MediaPipe loaded)
+  if(touchActive){palmX=touchX;palmY=touchY;hasInput=true;}
+  if(hasInput){
     targetY=palmY;tearActive=Math.min(tearActive+0.06,1.0);
   } else {targetY=1.5;tearActive=Math.max(tearActive-0.025,0.0);}
   smoothPalmY+=(targetY-smoothPalmY)*0.12;
