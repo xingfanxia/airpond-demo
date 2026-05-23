@@ -391,14 +391,12 @@ function updateFingersFromTouch(){
   }
 }
 
-// --- MediaPipe Hands ---
+// --- MediaPipe Hands (desktop only — on mobile, hands holding phone cause false positives) ---
+const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 let Hands, Camera;
 async function loadMediaPipe(){
+  if(isMobile){ console.log('Mobile device — using touch only'); return; }
   try {
-    const handsModule = await import('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js');
-    const camModule = await import('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js');
-
-    // MediaPipe exports to window
     await new Promise(r => {
       const script = document.createElement('script');
       script.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js';
