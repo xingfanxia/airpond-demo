@@ -141,9 +141,7 @@ void main(){
   float ampFactor = 1.0 - smoothstep(0.0, 0.08, abs(val)) * 0.006;
   val *= u_damping * ampFactor;
 
-  // Ambient noise
-  float noise = sin(v_uv.x * 43.7 + u_time * 0.7) * cos(v_uv.y * 37.3 + u_time * 1.1) * 0.0003;
-  val += noise;
+  // No ambient noise — water stays perfectly calm until touched
 
   // Finger interaction
   float aspect = u_texel.y / u_texel.x;
@@ -294,9 +292,10 @@ void main(){
   float facetBright = 1.0 + dot(facetGrad, vec2(0.3, 0.5)) * 0.3;
   color *= mix(1.0, facetBright, crystalMix);
 
-  // Subtle blue tint on still areas
-  float activity = clamp(abs(data) * 15.0, 0.0, 1.0);
-  color = mix(color * vec3(0.97, 0.98, 1.03), color, activity);
+  // Blend between clean camera and effect based on wave activity
+  float activity = smoothstep(0.0005, 0.008, abs(data) + gradLen * 0.5);
+  vec3 cleanCam = texture2D(u_camera, camUV).rgb;
+  color = mix(cleanCam, color, activity);
 
   gl_FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }`;
@@ -498,7 +497,7 @@ function render(){
     gl.uniform1i(simU.u_curr, 1);
 
     gl.uniform2f(simU.u_texel, 1.0/simW, 1.0/simH);
-    gl.uniform1f(simU.u_damping, 0.996);
+    gl.uniform1f(simU.u_damping, 0.985);
     gl.uniform1f(simU.u_radius, 1.0);
     gl.uniform1f(simU.u_time, time);
 
