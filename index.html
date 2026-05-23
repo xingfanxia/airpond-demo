@@ -575,9 +575,10 @@ document.getElementById('flip-btn').onclick=async()=>{
 };
 
 // ===== Init =====
+setTimeout(()=>{document.getElementById('loading').classList.add('hide')},6000);
 async function init(){
   resize();
-  await startCamera(facingMode);
+  try{await startCamera(facingMode)}catch(e){console.error('Camera:',e)}
   document.getElementById('loading').classList.add('hide');
   setTimeout(()=>{document.getElementById('hint').style.opacity='0'},4000);
   loadMediaPipe();
