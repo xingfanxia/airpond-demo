@@ -118,7 +118,7 @@ void main(){
   float lineY=u_tearY + u_tearTilt*(uv.x-0.5) + n;
 
   // Signed distance (positive = below line = camera side)
-  float dist=uv.y-lineY;
+  float dist=lineY-uv.y;
 
   // Smooth blend at edge
   float edge=0.004;
@@ -386,7 +386,7 @@ const fingers=new Float32Array(30);
 const prevFingers=new Float32Array(30);
 // Tear mode: palm center
 let palmX=0.5, palmY=0.5;
-let smoothPalmY=1.0; // start at 1 = no tear visible
+let smoothPalmY=1.5; // start offscreen = no tear visible
 let smoothPalmX=0.5;
 let tearActive=0;
 let handDetected=false;
@@ -419,7 +419,7 @@ function handleTouch(e){
   }
 }
 function handleTouchEnd(){
-  if(currentMode==='reveal')touchTearY=1.0;
+  if(currentMode==='reveal')touchTearY=1.5;
   if(!handsReady){prevFingers.set(fingers);fingers.fill(0);}
 }
 
@@ -481,7 +481,7 @@ function renderTear(){
     targetY=touchTearY;
     tearActive=Math.min(tearActive+0.08,1.0);
   } else {
-    targetY=1.0;
+    targetY=1.5;
     tearActive=Math.max(tearActive-0.025,0.0);
   }
 
@@ -563,7 +563,7 @@ function setMode(m){
   document.getElementById(m==='reveal'?'m-reveal':'m-ripple').classList.add('active');
   document.getElementById('hint').textContent=m==='reveal'?'Raise your hand to reveal ✨':'Touch or wave to make ripples 💧';
   document.getElementById('upload-btn').style.display=m==='reveal'?'':'none';
-  tearActive=0;smoothPalmY=1.0;
+  tearActive=0;smoothPalmY=1.5;
 }
 document.getElementById('m-reveal').onclick=()=>setMode('reveal');
 document.getElementById('m-ripple').onclick=()=>setMode('ripple');
