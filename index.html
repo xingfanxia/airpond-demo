@@ -146,7 +146,7 @@ void main(){
   // Finger interaction
   float aspect = u_texel.y / u_texel.x;
   vec2 uvAspect = vec2(v_uv.x, v_uv.y * aspect);
-  float baseRadius = 0.038 * u_radius;
+  float baseRadius = 0.028 * u_radius;
   float totalForce = 0.0;
 
   for(int i = 0; i < 10; i++){
@@ -157,7 +157,8 @@ void main(){
 
     float d = capsuleSDF(uvAspect, fa, fb);
     float vel = length(fa - fb);
-    float force = 0.6 + clamp(vel * 12.0, 0.0, 1.2);
+    float velGate = smoothstep(0.003, 0.015, vel);
+    float force = velGate * (0.6 + clamp(vel * 12.0, 0.0, 1.2));
 
     if(d < baseRadius){
       float strength = smoothstep(baseRadius, baseRadius * 0.3, d) * force;
@@ -224,17 +225,17 @@ void main(){
 
   // ---- LIQUID MODE ----
   // Refraction
-  vec2 refractOffset = grad * 0.55 * u_intensity * aspectVec;
+  vec2 refractOffset = grad * 0.35 * u_intensity * aspectVec;
 
   // Lens curvature
   vec2 lensOffset = vec2(0.0);
   if(gradLen > 0.001){
-    lensOffset = normalize(grad) * lap * 0.18 * u_intensity * aspectVec;
+    lensOffset = normalize(grad) * lap * 0.10 * u_intensity * aspectVec;
   }
   vec2 totalOffset = refractOffset + lensOffset;
 
   // Chromatic aberration
-  float dispersion = 0.015 + clamp(gradLen * 0.20, 0.0, 0.14);
+  float dispersion = 0.008 + clamp(gradLen * 0.10, 0.0, 0.06);
 
   // Pick offset based on mode
   vec2 finalOffset = mix(totalOffset, crystalOffset, crystalMix);
@@ -293,7 +294,7 @@ void main(){
   color *= mix(1.0, facetBright, crystalMix);
 
   // Blend between clean camera and effect based on wave activity
-  float activity = smoothstep(0.0005, 0.008, abs(data) + gradLen * 0.5);
+  float activity = smoothstep(0.001, 0.012, abs(data) + gradLen * 0.3);
   vec3 cleanCam = texture2D(u_camera, camUV).rgb;
   color = mix(cleanCam, color, activity);
 
@@ -345,7 +346,7 @@ let camTex;
 
 function initFBOs(){
   W = canvas.width; H = canvas.height;
-  simW = Math.floor(W / 2); simH = Math.floor(H / 2);
+  simW = Math.floor(W * 0.75); simH = Math.floor(H * 0.75);
   simFBOs = [createFBO(simW, simH), createFBO(simW, simH), createFBO(simW, simH)];
   if(camTex) gl.deleteTexture(camTex);
   camTex = gl.createTexture();
@@ -391,11 +392,9 @@ function updateFingersFromTouch(){
   }
 }
 
-// --- MediaPipe Hands (desktop only — on mobile, hands holding phone cause false positives) ---
-const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+// --- MediaPipe Hands ---
 let Hands, Camera;
 async function loadMediaPipe(){
-  if(isMobile){ console.log('Mobile device — using touch only'); return; }
   try {
     await new Promise(r => {
       const script = document.createElement('script');
@@ -479,7 +478,7 @@ function render(){
   setupAttrib(simProg);
   gl.viewport(0, 0, simW, simH);
 
-  for(let iter = 0; iter < 3; iter++){
+  for(let iter = 0; iter < 2; iter++){
     const prevFBO = simFBOs[0];
     const currFBO = simFBOs[1];
     const nextFBO = simFBOs[2];
@@ -495,7 +494,7 @@ function render(){
     gl.uniform1i(simU.u_curr, 1);
 
     gl.uniform2f(simU.u_texel, 1.0/simW, 1.0/simH);
-    gl.uniform1f(simU.u_damping, 0.985);
+    gl.uniform1f(simU.u_damping, 0.975);
     gl.uniform1f(simU.u_radius, 1.0);
     gl.uniform1f(simU.u_time, time);
 
